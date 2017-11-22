@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""
+ncurl is the curl of NETCONF
+
+REST APIs, without there actually existing a single clear definition of what
+that means, are ridiculously popular and it's the belief of the author that the
+ubiquitousness of curl has had a significantly positive impact by on HTTPs
+popularity in the system space.
+
+HTTP is nothing more than a couple of commands sent over telnet. NETCONF is
+nothing more than a couple of commands send over SSH. Yet a lot of people see
+red at first mention of NETCONF, despite its technical merits, and instead ask
+for a REST API. Perhaps the lack of a omnipresent NETCONF client prevents wider
+adoption. Perhaps ncurl is the answer.
+
+<braveheart>NEEEEEEETTTCOOOOONF</braveheart>
+
+--filter can be used together with 
+
+Examples, only get firewall config on JUNOS:
+    --get --filter '<configuration><firewall></firewall></configuration>'
+"""
+
+import sys
+
+from ncclient import manager
+
+# order of operation:
+# edit-config
+# get
+
+def suggest_edit_config(capabilities):
+    """ Suggest how to edit the configuration of a device based on what
+    capabilities it supports
+    """
+    short_caps = {}
+    for cap in capabilities:
+        if cap.startswith('urn:ietf:params:netconf:capability:'):
+            cap_name = cap[len('urn:ietf:params:netconf:capability:'):].split('?')[0]
+            short_caps[cap_name] = True
+
+    if 'candidate:1.0' in short_caps:
+        if 'writable-running:1.0' in short_caps:
+            print("WEIRD: Device also supports writable-runnig, which is just weird, prefer to use candidate!")
+        print("lock target=running")
+        print("lock target=candidate")
+        print("edit-config target=candidate")
+        if 'validate:1.0' in short_caps or 'validate:1.1' in short_caps:
+            print("validate")
+        if 'confirmed-commit:1.0' in short_caps or 'confirmed-commit:1.1' in short_caps:
+            print("commit confirmed timeout=400")
+            print("<sleep 300>")
+            print("commit persist")
+        else:
+            print("commit")
+        print("unlock target=candidate")
+        print("unlock target=running")
+        if 'startup:1.0' in short_caps:
+            print("copy-config source=running target=startup")
+    else:
+        if 'writable-running:1.0' in short_caps:
+            print("edit-config target=running")
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser("ncclient")
+    parser.add_argument('-H', '--host', required=True, help="NETCONF server to connect to")
+    parser.add_argument('-P', '--port', type=int, default=830, help="Port to connect to [830]")
+    parser.add_argument('-u', '--username', required=True, help="Username to authenticate with")
+    parser.add_argument('-p', '--password', help="Password to authenticate with")
+    parser.add_argument('--ssh-skip-hostkey-verify', action="store_false",
+                        default=True, help="Skip SSH host key verification.")
+    parser.add_argument('--capabilities', action="store_true",
+                        help="List all capabilities support by the device")
+    parser.add_argument('--get', action="store_true",
+                        help="Do a get RPC")
+    parser.add_argument('--get-config', help="Do a get-config RPC on the specified datastore (try 'running')")
+    parser.add_argument('--xpath',
+                        help="XPath, to be used in conjunction with --get or --get-config")
+    parser.add_argument('--filter',
+                        help="XML subtree filter, to be used in conjunction with --get or --get-config")
+    parser.add_argument('--suggest-config', action="store_true",
+                        help="Suggest how to edit the configuration on the device based on its capabilities")
+    args = parser.parse_args()
+
+
+    with manager.connect(host=args.host,
+                         port=args.port,
+                         username=args.username,
+                         password=args.password,
+                         hostkey_verify=args.ssh_skip_hostkey_verify,
+                         allow_agent=False,
+                         look_for_keys=False) as m:
+        if args.capabilities:
+            for cap in m.server_capabilities:
+                print(cap)
+
+        if args.get:
+            fltr = None
+            if args.xpath:
+                if 'urn:ietf:params:netconf:capability:xpath:1.0' not in m.server_capabilities:
+                    print("Device does not support XPath (missing capability: urn:ietf:params:netconf:capability:xpath:1.0)",
+                            file=sys.stderr)
+                    sys.exit(1)
+                fltr = ('xpath', args.xpath)
+            if args.filter:
+                fltr = ('subtree', args.filter)
+            print(m.get(fltr))
+
+        if args.get_config:
+            fltr = None
+            if args.xpath:
+                if 'urn:ietf:params:netconf:capability:xpath:1.0' not in m.server_capabilities:
+                    print("Device does not support XPath (missing capability: urn:ietf:params:netconf:capability:xpath:1.0)",
+                            file=sys.stderr)
+                    sys.exit(1)
+                fltr = ('xpath', args.xpath)
+            if args.filter:
+                fltr = ('subtree', args.filter)
+            print(m.get_config(source=args.get_config, filter=fltr))
+
+#        if args.lock:
+#            pass
+
+        if args.suggest_config:
+            print("Here is how I think you should configure this device:")
+            suggest_edit_config(m.server_capabilities)
+
+        if args.config:
+            pass
